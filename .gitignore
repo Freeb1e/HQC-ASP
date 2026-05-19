@@ -1,0 +1,38 @@
+# Verilator build outputs
+obj_dir/
+obj_dir_*/
+*.d
+*.o
+*.a
+
+# Simulation binaries and generated waveforms
+waveform.*
+*.vcd
+*.fst
+*.lxt
+*.lxt2
+*.vpd
+*.fsdb
+
+# Logs and run artifacts
+*.log
+*.out
+*.dump
+*.trace
+core
+core.*
+
+# Local tool state
+.codex/
+.agents/
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+plan.md
