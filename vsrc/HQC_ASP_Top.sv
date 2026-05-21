@@ -10,6 +10,9 @@ module HQC_ASP_Top (
 
         input logic [127:0] bram_out_data,//output polynomial
         output logic [15:0] bram_out_addr,
+        output logic [127:0] bram_out_data_w,
+        output logic [15:0] bram_out_addr_w,
+
         output logic [15:0] wmask,
         output logic wen,
 
@@ -26,39 +29,284 @@ module HQC_ASP_Top (
     logic [5:0] nmod;
     logic [7:0] weight;
 
-    typedef enum{
-                IDLE,
-                CALC
-            }state_space;
+    function automatic logic [15:0] block_cnt2addr(
+        input logic [8:0] block_cnt
+    );
+        begin
+            block_cnt2addr = {3'b000, block_cnt, 4'b0000};
+        end
+    endfunction
 
-    state_space current_state;
+    typedef enum logic [2:0] {
+                OUT_IDLE,
+                OUT_START,
+                OUT_PREFETCH_TAIL_1,
+                OUT_PREFETCH_TAIL_2,
+                OUT_PREFTCH_HEAD,
+                OUT_LOAD_POS,
+                OUT_CALC
+            } state_space_1;
+
+    state_space_1 out_state;
+
+    typedef enum logic [1:0] {
+            CALC_IDLE,
+            CALC_SEG_A,
+            CALC_SEG_B,
+            CALC_SEG_C
+            } state_space_2;
+
+    state_space_2 calc_state;
+
+    logic [127:0] tail_buffer_1, tail_buffer_2, head_buffer;
+    logic [8:0] block_cnt;
+    logic [8:0] result_cnt;
+    logic [255:0] calc_buffer;
+    logic bdbias;
+    logic pipeline_valid;
     logic calc_done;
-    assign calc_done = 1'b0;
+    logic [15:0] current_pos;
+    logic [6:0] current_pos_mod;
+    logic [8:0] current_pos_block;
+    logic [7:0] shift_amount;
+    logic [127:0] shifted_polynomial;
 
-    always@(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin
-            current_state <= IDLE;
+    assign current_pos_mod = current_pos[6:0];
+    assign current_pos_block = current_pos[15:7];
+    assign bdbias = (current_pos_mod > {1'b0, nmod}) ? 1'b1 : 1'b0;//b-d<0 bdbias=1, else 0
+    // when b-d<0 pick data starting from 128-(b-d) else pick data starting from (b-d) 
+    assign shift_amount = bdbias ? (8'd128 + {2'd0, nmod} - {1'b0, current_pos_mod}): ({2'd0, nmod} - {1'b0, current_pos_mod});
+    assign shifted_polynomial = calc_buffer[shift_amount +: 128];
+
+    logic [255:0] segB_upper;
+    logic [383:0] segB_buffer;
+    logic [127:0] shifted_polynomial_B;
+    logic [8:0] segB_extract_pos;
+    logic [7:0] shift_amount_C;
+    logic [127:0] shifted_polynomial_C;
+
+    // Concatenate the two tail words with one head word
+    assign segB_upper = ({128'd0, head_buffer} << nmod) | {128'd0, tail_buffer_2};
+    assign segB_buffer = {segB_upper, tail_buffer_1};
+    //pick data starting from 128-(b-d)
+    assign segB_extract_pos = 9'd128 + {3'd0, nmod} - {2'd0, current_pos_mod};
+    assign shifted_polynomial_B = segB_buffer[segB_extract_pos +: 128];
+    // SEG_C: no nmod correction, just 128-d
+    assign shift_amount_C = 8'd128 - {1'b0, current_pos_mod};
+    assign shifted_polynomial_C = calc_buffer[shift_amount_C +: 128];
+    always_comb begin//bram_dense_addr
+        bram_dense_addr = '0;
+        case (out_state)
+            OUT_IDLE: begin
+                bram_dense_addr = block_cnt2addr(n - 9'd1);
+            end
+            OUT_PREFETCH_TAIL_1: begin
+                bram_dense_addr = block_cnt2addr(n);
+            end
+            OUT_PREFETCH_TAIL_2: begin
+                bram_dense_addr = block_cnt2addr(9'd0);
+            end
+            OUT_PREFTCH_HEAD: begin
+                bram_dense_addr = block_cnt2addr(n - current_pos_block - {8'd0, bdbias});
+            end
+            OUT_CALC: begin
+                if (calc_state == CALC_IDLE)
+                    bram_dense_addr = block_cnt2addr(n - current_pos_block - {8'd0, bdbias} + 9'd1);
+                else
+                    bram_dense_addr = block_cnt2addr(block_cnt);
+            end
+            default: begin
+                bram_dense_addr = '0;
+            end
+        endcase
+    end
+    
+
+    always_comb begin//bram_out_addr (read side, 1 cycle ahead)
+        bram_out_addr = '0;
+        case (calc_state)
+            CALC_IDLE: begin
+                bram_out_addr = block_cnt2addr(9'd0);
+            end
+            CALC_SEG_A: begin
+                bram_out_addr = block_cnt2addr(result_cnt);
+            end
+            CALC_SEG_B: begin
+                bram_out_addr = block_cnt2addr(current_pos_block);
+            end
+            CALC_SEG_C: begin
+                bram_out_addr = block_cnt2addr(result_cnt);
+            end
+            default: begin
+                bram_out_addr = '0;
+            end
+        endcase
+    end
+    always_ff@(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            out_state <= OUT_IDLE;
         end
         else begin
-            case(current_state)
-                IDLE: begin
-                    current_state <= (start)? CALC : IDLE;
+            case (out_state)
+                OUT_IDLE: begin
+                    if (start) begin
+                        out_state <= OUT_PREFETCH_TAIL_1;
+                    end
                 end
-                CALC: begin
-                    current_state <= (calc_done)? IDLE : CALC;
+                OUT_PREFETCH_TAIL_1: begin
+                    out_state <= OUT_PREFETCH_TAIL_2;
+                    tail_buffer_1 <= bram_dense_data;
+                end
+                OUT_PREFETCH_TAIL_2: begin
+                    out_state <= OUT_PREFTCH_HEAD;
+                    tail_buffer_2 <= bram_dense_data;
+                end
+                OUT_PREFTCH_HEAD: begin
+                    out_state <= OUT_CALC;
+                    head_buffer <= bram_dense_data;
+                end
+                OUT_CALC: begin
+
+                end
+                default: begin
+                    out_state <= OUT_IDLE;
                 end
             endcase
-            ]
         end
     end
 
-    always@(posedge clk or negedge rst_n) begin
+    always_ff@(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            calc_state <= CALC_IDLE;
+            calc_buffer <= '0;
+            block_cnt <= '0;
+            result_cnt <= '0;
+            pipeline_valid <= 1'b0;
+            wen <= 1'b0;
+            calc_done <= 1'b0;
+        end
+        else begin
+            case (calc_state)
+                CALC_IDLE: begin
+                    wen <= 1'b0;
+                    pipeline_valid <= 1'b0;
+                    if (out_state == OUT_CALC && !calc_done) begin
+                        if (current_pos_block == 9'd0) begin
+                            calc_state <= CALC_SEG_B;
+                            result_cnt <= '0;
+                        end else begin
+                            calc_state <= CALC_SEG_A;
+                            block_cnt <= n - current_pos_block - {8'd0, bdbias} + 9'd2;
+                            result_cnt <= '0;
+                            calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
+                        end
+                    end
+                end
+                CALC_SEG_A: begin
+                    calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
+                    block_cnt <= block_cnt + 9'd1;
+
+                    if (pipeline_valid) begin
+                        bram_out_data_w <= shifted_polynomial ^ bram_out_data;
+                        bram_out_addr_w <= block_cnt2addr(result_cnt);
+                        wen <= 1'b1;
+                        result_cnt <= result_cnt + 9'd1;
+                        if (result_cnt == current_pos_block - 9'd1) begin
+                            calc_state <= CALC_SEG_B;
+                            pipeline_valid <= 1'b0;
+                        end
+                    end else begin
+                        pipeline_valid <= 1'b1;
+                        wen <= 1'b0;
+                    end
+                end
+                CALC_SEG_B: begin
+                    if (pipeline_valid) begin
+                        if (current_pos_block == n)
+                            bram_out_data_w <= (shifted_polynomial_B ^ bram_out_data) & ((128'd1 << nmod) - 128'd1);
+                        else
+                            bram_out_data_w <= shifted_polynomial_B ^ bram_out_data;
+                        bram_out_addr_w <= block_cnt2addr(current_pos_block);
+                        wen <= 1'b1;
+                        result_cnt <= result_cnt + 9'd1;
+                        if (current_pos_block >= n) begin
+                            calc_state <= CALC_IDLE;
+                            pipeline_valid <= 1'b0;
+                            calc_done <= 1'b1;
+                        end else begin
+                            calc_state <= CALC_SEG_C;
+                            pipeline_valid <= 1'b0;
+                            calc_buffer <= {head_buffer, 128'd0};
+                            block_cnt <= 9'd2;
+                        end
+                    end else begin
+                        pipeline_valid <= 1'b1;
+                        wen <= 1'b0;
+                        block_cnt <= 9'd1;
+                    end
+                end
+                CALC_SEG_C: begin
+                    calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
+                    block_cnt <= block_cnt + 9'd1;
+
+                    if (pipeline_valid) begin
+                        if (result_cnt == n)
+                            bram_out_data_w <= (shifted_polynomial_C ^ bram_out_data) & ((128'd1 << nmod) - 128'd1);
+                        else
+                            bram_out_data_w <= shifted_polynomial_C ^ bram_out_data;
+                        bram_out_addr_w <= block_cnt2addr(result_cnt);
+                        wen <= 1'b1;
+                        result_cnt <= result_cnt + 9'd1;
+                        if (result_cnt == n) begin
+                            calc_state <= CALC_IDLE;
+                            pipeline_valid <= 1'b0;
+                            calc_done <= 1'b1;
+                        end
+                    end else begin
+                        pipeline_valid <= 1'b1;
+                        wen <= 1'b0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign wmask = 16'hFFFF;
+    assign bram_sparse_addr = 16'd0;
+
+    logic [2:0] weight_idx;
+    assign weight_idx = 3'd0;
+
+    always_comb begin
+        case (weight_idx)
+            3'd0:
+                current_pos = bram_sparse_data[15:0];
+            3'd1:
+                current_pos = bram_sparse_data[31:16];
+            3'd2:
+                current_pos = bram_sparse_data[47:32];
+            3'd3:
+                current_pos = bram_sparse_data[63:48];
+            3'd4:
+                current_pos = bram_sparse_data[79:64];
+            3'd5:
+                current_pos = bram_sparse_data[95:80];
+            3'd6:
+                current_pos = bram_sparse_data[111:96];
+            3'd7:
+                current_pos = bram_sparse_data[127:112];
+        endcase
+    end
+
+    
+
+        always@(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             n      <= '0;
             nmod   <= '0;
             weight <= '0;
         end
-        else if (current_state == IDLE) begin
+        else if (out_state == OUT_IDLE) begin
             case (HQC_MODE[2:1])
                 2'd1: begin
                     n      <= n_HQC1;
@@ -81,75 +329,6 @@ module HQC_ASP_Top (
                     weight <= '0;
                 end
             endcase
-        end
-    end
-    logic [7:0] weight_counter;
-    logic [15:0] current_pos;
-    logic pos_loaded;
-    logic bitdone,bitinit;
-    assign bram_sparse_addr = {7'd0, weight_counter[7:3], 4'b000};
-
-    always@(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin
-            weight_counter <= 8'd0;
-            pos_loaded<=1'b1;
-        end
-        else begin
-            if(bitdone && weight_counter < weight) begin
-                weight_counter <= weight_counter + 8'd1;
-                pos_loaded <= 1'b1;
-                bitinit <=1'b1;
-            end
-        end
-    end
-    always_comb begin
-        case (idx)
-            3'd0:
-                current_pos = bram_sparse_data[15:0];
-            3'd1:
-                current_pos = bram_sparse_data[31:16];
-            3'd2:
-                current_pos = bram_sparse_data[47:32];
-            3'd3:
-                current_pos = bram_sparse_data[63:48];
-            3'd4:
-                current_pos = bram_sparse_data[79:64];
-            3'd5:
-                current_pos = bram_sparse_data[95:80];
-            3'd6:
-                current_pos = bram_sparse_data[111:96];
-            3'd7:
-                current_pos = bram_sparse_data[127:112];
-        endcase
-    end
-    logic [6:0] current_bias;
-    logic [8:0] current_block;
-    logic [127:0] polynomial_buffer_0,polynomial_buffer_1;
-    logic [127:0] shifted_polynomial;
-    logic block
-    always_comb begin
-        current_bias = current_pos[6:0];
-        current_block = current_pos[15:7];
-        bram_dense_addr = {current_block + block_counter, 7'b0};
-        if(bram_dense_addr >n) begin
-            bram_dense_addr = n - bram_dense_addr;
-        end else begin
-            bram_dense_addr = bram_dense_addr;
-        end
-    end
-
-    always_comb begin
-        shifted_polynomial = 
-    end
-    logic [8:0] block_counter;
-    always@(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin
-            polynomial_buffer_0 <= 127'b0;
-            polynomial_buffer_1 <= 127'b0;
-        end
-        else begin
-            polynomial_buffer_0 <= bram_dense_data;
-            polynomial_buffer_1 <= polynomial_buffer_0;
         end
     end
 endmodule

@@ -36,3 +36,5 @@ core.*
 Thumbs.db
 
 plan.md
+
+*.bin

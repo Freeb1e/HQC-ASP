@@ -11,8 +11,10 @@ module TEST_PLATFORM (
     logic [127:0] sparse_data;
     logic [15:0] sparse_addr;
 
-    logic [127:0] out_data;
-    logic [15:0] out_addr;
+    logic [127:0] out_rdata;
+    logic [15:0] out_raddr;
+    logic [127:0] out_wdata;
+    logic [15:0] out_waddr;
     logic [15:0] out_wmask;
     logic out_wen;
 
@@ -26,8 +28,10 @@ module TEST_PLATFORM (
         .bram_sparse_data(sparse_data),
         .bram_sparse_addr(sparse_addr),
 
-        .bram_out_data(out_data),
-        .bram_out_addr(out_addr),
+        .bram_out_data(out_rdata),
+        .bram_out_addr(out_raddr),
+        .bram_out_data_w(out_wdata),
+        .bram_out_addr_w(out_waddr),
         .wmask(out_wmask),
         .wen(out_wen),
 
@@ -63,12 +67,12 @@ module TEST_PLATFORM (
         .BRAM_ID(2)
     ) u_out_ram (
         .clk(clk),
-        .raddr({16'd0, out_addr}),
-        .waddr({16'd0, out_addr}),
-        .wdata(128'd0),
+        .raddr({16'd0, out_raddr}),
+        .waddr({16'd0, out_waddr}),
+        .wdata(out_wdata),
         .wmask(out_wmask),
         .wen(out_wen),
-        .rdata(out_data)
+        .rdata(out_rdata)
     );
 
 endmodule

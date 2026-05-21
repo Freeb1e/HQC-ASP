@@ -9,8 +9,7 @@
 #include "VTEST_PLATFORM.h"
 #include "VTEST_PLATFORM__Syms.h"
 #include "memory.h"
-#include <fstream>
-#include <iomanip>
+#include <cstring>
 #include "config.h"
 
 #ifdef TRACE_ON
@@ -36,27 +35,36 @@ void runtill();
 
 int main(int argc, char **argv, char **env)
 {
-    // 1. initialize verilator and create instance of the DUT
     dut = new VTEST_PLATFORM;
-    Verilated::traceEverOn(true);
-    m_trace = new TraceType;
-    dut->trace(m_trace, 5);
-    m_trace->open(trace_file);
-    //=======================================================
-    // 2. dut reset
+    Verilated::traceEverOn(trace_on);
+    if (trace_on) {
+        m_trace = new TraceType;
+        dut->trace(m_trace, 5);
+        m_trace->open(trace_file);
+    }
+
+    load_bin_to_ram("bin/dense.bin", dense_ram, RAM_SIZE, 0);
+    load_bin_to_ram("bin/sparse.bin", sparse_ram, RAM_SIZE, 0);
+    memset(result_ram, 0, RAM_SIZE);
+
     dut->rst_n = 0;
+    dut->start = 0;
+    dut->HQC_MODE = 0b010;
+    tick();
     tick();
     dut->rst_n = 1;
     tick();
+
     dut->start = 1;
     tick();
     dut->start = 0;
-    //=======================================================
-    // 3. main simulation loop
-    tick();
+
     runtill();
 
-    m_trace->close();
+    dump_ram_to_bin("bin/result.bin", result_ram, RAM_SIZE, 0, 2224);
+
+    if (trace_on && m_trace)
+        m_trace->close();
     delete dut;
     exit(EXIT_SUCCESS);
 }
