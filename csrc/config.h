@@ -1,1 +1,1 @@
-#define MAX_SIM_TIME 50000
+#define MAX_SIM_TIME 200000

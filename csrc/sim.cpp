@@ -35,6 +35,17 @@ void runtill();
 
 int main(int argc, char **argv, char **env)
 {
+    int hqc_mode = 0b010;
+    if (argc > 1) hqc_mode = atoi(argv[1]);
+
+    int dump_size = 0;
+    switch (hqc_mode & 0b110) {
+        case 0b010: dump_size = (138 + 1) * 16; break;
+        case 0b100: dump_size = (280 + 1) * 16; break;
+        case 0b110: dump_size = (450 + 1) * 16; break;
+        default:    dump_size = 2224; break;
+    }
+
     dut = new VTEST_PLATFORM;
     Verilated::traceEverOn(trace_on);
     if (trace_on) {
@@ -49,7 +60,7 @@ int main(int argc, char **argv, char **env)
 
     dut->rst_n = 0;
     dut->start = 0;
-    dut->HQC_MODE = 0b010;
+    dut->HQC_MODE = hqc_mode;
     tick();
     tick();
     dut->rst_n = 1;
@@ -61,7 +72,7 @@ int main(int argc, char **argv, char **env)
 
     runtill();
 
-    dump_ram_to_bin("bin/result.bin", result_ram, RAM_SIZE, 0, 2224);
+    dump_ram_to_bin("bin/result.bin", result_ram, RAM_SIZE, 0, dump_size);
 
     if (trace_on && m_trace)
         m_trace->close();
@@ -85,6 +96,8 @@ void tick()
 
 void runtill()
 {
+    vluint64_t cycle_count = 0;
+    bool started = false;
     do
     {
         dut->clk ^= 1;
@@ -92,5 +105,15 @@ void runtill()
         if (trace_on && m_trace)
             m_trace->dump(sim_time);
         sim_time++;
+        if (dut->clk) {
+            cycle_count++;
+            auto state = dut->TEST_PLATFORM__DOT__u_hqc_asp_top__DOT__out_state;
+            if (state != 0) started = true;
+            if (started && state == 0) {
+                printf("Done in %lu cycles\n", cycle_count);
+                return;
+            }
+        }
     } while (sim_time < MAX_SIM_TIME);
+    printf("Timeout after %lu cycles\n", cycle_count);
 }
