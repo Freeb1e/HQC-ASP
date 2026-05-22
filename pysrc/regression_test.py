@@ -63,10 +63,17 @@ def cyclic_shift_xor(dense_bits, position):
     return result
 
 
-def write_sparse_bin(position):
-    sparse_bytes = position.to_bytes(16, byteorder='little')
+def write_sparse_bin(positions):
+    """Write sparse.bin with multiple 16-bit positions packed into 128-bit words."""
+    n_pos = len(positions)
+    n_words = (n_pos + 7) // 8
+    data = bytearray(n_words * 16)
+    for i, pos in enumerate(positions):
+        offset = i * 2
+        data[offset] = pos & 0xFF
+        data[offset + 1] = (pos >> 8) & 0xFF
     with open(os.path.join(BIN_DIR, 'sparse.bin'), 'wb') as f:
-        f.write(sparse_bytes)
+        f.write(bytes(data))
 
 
 def run_sim():
@@ -123,6 +130,8 @@ def main():
     with open(os.path.join(BIN_DIR, 'dense.bin'), 'wb') as f:
         f.write(dense_bytes)
 
+    WEIGHT = 66  # HQC1 weight
+
     positions = range(args.start, args.end + 1, args.step)
     total = len(positions)
     passed = 0
@@ -131,13 +140,21 @@ def main():
 
     print(f"=== HQC-ASP Regression Test ===")
     print(f"Positions: {args.start} to {args.end}, step {args.step} ({total} tests)")
+    print(f"Weight: {WEIGHT}")
     print()
 
     for idx, pos in enumerate(positions):
-        expected_bits = cyclic_shift_xor(dense_bits, pos)
+        # Generate WEIGHT random sparse positions with a deterministic seed per test
+        rng = np.random.RandomState(seed=pos + 1000)
+        sparse_positions = rng.randint(0, N_BITS, size=WEIGHT).tolist()
+
+        # Compute expected: XOR of all cyclic shifts
+        expected_bits = np.zeros(N_BITS, dtype=np.uint8)
+        for sp in sparse_positions:
+            expected_bits ^= cyclic_shift_xor(dense_bits, sp)
         expected_words = bits_to_words(expected_bits, TOTAL_WORDS)
 
-        write_sparse_bin(pos)
+        write_sparse_bin(sparse_positions)
 
         if not run_sim():
             print(f"  FAIL pos={pos}: simulator crashed")

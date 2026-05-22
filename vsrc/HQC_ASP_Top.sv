@@ -63,7 +63,8 @@ module HQC_ASP_Top (
     logic [8:0] result_cnt;
     logic [255:0] calc_buffer;
     logic bdbias;
-    logic pipeline_valid;
+    logic pipe_fill;
+    logic pipe_ready;
     logic one_pos_done;
     logic [15:0] current_pos;
     logic [6:0] current_pos_mod;
@@ -100,8 +101,11 @@ module HQC_ASP_Top (
     end
 
     // Strategy 1: single shared 256-bit barrel shifter for SEG_A/B/C
+    // Pipeline: register inputs to break critical path
     logic [255:0] shifter_src;
     logic [7:0]   shifter_shift;
+    logic [255:0] shifter_src_reg;
+    logic [7:0]   shifter_shift_reg;
     logic [127:0] shifter_out;
 
     always_comb begin
@@ -124,7 +128,12 @@ module HQC_ASP_Top (
             end
         endcase
     end
-    assign shifter_out = shifter_src[shifter_shift +: 128];
+
+    always_ff @(posedge clk) begin
+        shifter_src_reg   <= shifter_src;
+        shifter_shift_reg <= shifter_shift;
+    end
+    assign shifter_out =  [shifter_shift_reg +: 128];
     logic start_oncepos;
     always_comb begin//bram_dense_addr
         bram_dense_addr = '0;
@@ -157,20 +166,20 @@ module HQC_ASP_Top (
     end
     
 
-    always_comb begin//bram_out_addr (read side, 1 cycle ahead)
+    always_comb begin//bram_out_addr (read side, aligned with pipeline)
         bram_out_addr = '0;
         case (calc_state)
             CALC_IDLE: begin
                 bram_out_addr = block_cnt2addr(9'd0);
             end
             CALC_SEG_A: begin
-                bram_out_addr = pipeline_valid ? block_cnt2addr(result_cnt + 9'd1) : block_cnt2addr(result_cnt);
+                bram_out_addr = pipe_ready ? block_cnt2addr(result_cnt + 9'd1) : block_cnt2addr(result_cnt);
             end
             CALC_SEG_B: begin
                 bram_out_addr = block_cnt2addr(current_pos_block);
             end
             CALC_SEG_C: begin
-                bram_out_addr = pipeline_valid ? block_cnt2addr(result_cnt + 9'd1) : block_cnt2addr(result_cnt);
+                bram_out_addr = pipe_ready ? block_cnt2addr(result_cnt + 9'd1) : block_cnt2addr(result_cnt);
             end
             default: begin
                 bram_out_addr = '0;
@@ -230,7 +239,8 @@ module HQC_ASP_Top (
             calc_buffer <= '0;
             block_cnt <= '0;
             result_cnt <= '0;
-            pipeline_valid <= 1'b0;
+            pipe_fill <= 1'b0;
+            pipe_ready <= 1'b0;
             wen <= 1'b0;
             one_pos_done <= 1'b0;
             weight_cnt <= '0;
@@ -240,11 +250,12 @@ module HQC_ASP_Top (
                 one_pos_done <= 1'b0;
             if(out_state == OUT_IDLE)
                 weight_cnt <= '0;
-                
+
             case (calc_state)
                 CALC_IDLE: begin
                     wen <= 1'b0;
-                    pipeline_valid <= 1'b0;
+                    pipe_fill <= 1'b0;
+                    pipe_ready <= 1'b0;
                     if (start_oncepos) begin
                         if (current_pos_block == 9'd0) begin
                             calc_state <= CALC_SEG_B;
@@ -261,22 +272,26 @@ module HQC_ASP_Top (
                     calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
                     block_cnt <= block_cnt + 9'd1;
 
-                    if (pipeline_valid) begin
+                    if (pipe_ready) begin
                         bram_out_data_w <= shifter_out ^ bram_out_data;
                         bram_out_addr_w <= block_cnt2addr(result_cnt);
                         wen <= 1'b1;
                         result_cnt <= result_cnt + 9'd1;
                         if (result_cnt == current_pos_block - 9'd1) begin
                             calc_state <= CALC_SEG_B;
-                            pipeline_valid <= 1'b0;
+                            pipe_fill <= 1'b0;
+                            pipe_ready <= 1'b0;
                         end
+                    end else if (pipe_fill) begin
+                        pipe_ready <= 1'b1;
+                        wen <= 1'b0;
                     end else begin
-                        pipeline_valid <= 1'b1;
+                        pipe_fill <= 1'b1;
                         wen <= 1'b0;
                     end
                 end
                 CALC_SEG_B: begin
-                    if (pipeline_valid) begin
+                    if (pipe_ready) begin
                         if (current_pos_block == n)
                             bram_out_data_w <= (shifter_out ^ bram_out_data) & nmod_mask;
                         else
@@ -286,17 +301,22 @@ module HQC_ASP_Top (
                         result_cnt <= result_cnt + 9'd1;
                         if (current_pos_block >= n) begin
                             calc_state <= CALC_IDLE;
-                            pipeline_valid <= 1'b0;
+                            pipe_fill <= 1'b0;
+                            pipe_ready <= 1'b0;
                             one_pos_done <= 1'b1;
                             weight_cnt <= weight_cnt + 8'd1;
                         end else begin
                             calc_state <= CALC_SEG_C;
-                            pipeline_valid <= 1'b0;
+                            pipe_fill <= 1'b0;
+                            pipe_ready <= 1'b0;
                             calc_buffer <= {head_buffer, 128'd0};
                             block_cnt <= 9'd2;
                         end
+                    end else if (pipe_fill) begin
+                        pipe_ready <= 1'b1;
+                        wen <= 1'b0;
                     end else begin
-                        pipeline_valid <= 1'b1;
+                        pipe_fill <= 1'b1;
                         wen <= 1'b0;
                         block_cnt <= 9'd1;
                     end
@@ -305,7 +325,7 @@ module HQC_ASP_Top (
                     calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
                     block_cnt <= block_cnt + 9'd1;
 
-                    if (pipeline_valid) begin
+                    if (pipe_ready) begin
                         if (result_cnt == n)
                             bram_out_data_w <= (shifter_out ^ bram_out_data) & nmod_mask;
                         else
@@ -315,12 +335,16 @@ module HQC_ASP_Top (
                         result_cnt <= result_cnt + 9'd1;
                         if (result_cnt == n) begin
                             calc_state <= CALC_IDLE;
-                            pipeline_valid <= 1'b0;
+                            pipe_fill <= 1'b0;
+                            pipe_ready <= 1'b0;
                             one_pos_done <= 1'b1;
                             weight_cnt <= weight_cnt + 8'd1;
                         end
+                    end else if (pipe_fill) begin
+                        pipe_ready <= 1'b1;
+                        wen <= 1'b0;
                     end else begin
-                        pipeline_valid <= 1'b1;
+                        pipe_fill <= 1'b1;
                         wen <= 1'b0;
                     end
                 end
