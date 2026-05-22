@@ -2,7 +2,9 @@ module TEST_PLATFORM (
     input logic clk,
     input logic rst_n,
     input logic start,
-    input logic [2:0] HQC_MODE
+    input logic [2:0] HQC_MODE,
+    output logic [127:0] out_wdata_o,
+    output logic out_wen_o
 );
 
     logic [127:0] dense_data;
@@ -17,6 +19,9 @@ module TEST_PLATFORM (
     logic [15:0] out_waddr;
     logic [15:0] out_wmask;
     logic out_wen;
+
+    assign out_wdata_o = out_wdata;
+    assign out_wen_o = out_wen;
 
     HQC_ASP_Top u_hqc_asp_top (
         .clk(clk),
@@ -39,6 +44,7 @@ module TEST_PLATFORM (
         .start(start)
     );
 
+`ifdef SIMULATION
     block_ram_128bit #(
         .BRAM_ID(0)
     ) u_dense_ram (
@@ -74,5 +80,51 @@ module TEST_PLATFORM (
         .wen(out_wen),
         .rdata(out_rdata)
     );
+`else
+    dense_ram u_dense_ram (
+        .clka(clk),
+        .ena(1'b1),
+        .wea(1'b0),
+        .addra(dense_addr),
+        .dina(128'd0),
+        .douta(dense_data),
+        .clkb(clk),
+        .enb(1'b0),
+        .web(1'b0),
+        .addrb(16'd0),
+        .dinb(128'd0),
+        .doutb()
+    );
+
+    sparse_ram u_sparse_ram (
+        .clka(clk),
+        .ena(1'b1),
+        .wea(1'b0),
+        .addra(sparse_addr),
+        .dina(128'd0),
+        .douta(sparse_data),
+        .clkb(clk),
+        .enb(1'b0),
+        .web(1'b0),
+        .addrb(16'd0),
+        .dinb(128'd0),
+        .doutb()
+    );
+
+    result_ram u_out_ram (
+        .clka(clk),
+        .ena(1'b1),
+        .wea(1'b0),
+        .addra(out_raddr),
+        .dina(128'd0),
+        .douta(out_rdata),
+        .clkb(clk),
+        .enb(1'b1),
+        .web(out_wen),
+        .addrb(out_waddr),
+        .dinb(out_wdata),
+        .doutb()
+    );
+`endif
 
 endmodule
