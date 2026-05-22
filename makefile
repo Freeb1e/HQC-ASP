@@ -12,7 +12,7 @@ TOP_NAME ?= TEST_PLATFORM
 FST_OBJ_DIR ?= obj_dir_fst
 VCD_OBJ_DIR ?= obj_dir_vcd
 
-VERILATOR_BASE_FLAGS = -cc $(VERILOG) --exe $(CSOURCE) --top-module $(TOP_NAME) -Mdir $(OBJ_DIR) -Ivsrc
+VERILATOR_BASE_FLAGS = -cc $(VERILOG) --exe $(CSOURCE) --top-module $(TOP_NAME) -Mdir $(OBJ_DIR) -Ivsrc -DSIMULATION
 
 build: OBJ_DIR = $(FST_OBJ_DIR)
 build:

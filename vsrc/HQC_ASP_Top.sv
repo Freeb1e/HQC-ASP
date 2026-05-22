@@ -69,31 +69,62 @@ module HQC_ASP_Top (
     logic [6:0] current_pos_mod;
     logic [8:0] current_pos_block;
     logic [7:0] shift_amount;
-    logic [127:0] shifted_polynomial;
+    logic [7:0] shift_amount_C;
 
     assign current_pos_mod = current_pos[6:0];
     assign current_pos_block = current_pos[15:7];
-    assign bdbias = (current_pos_mod > {1'b0, nmod}) ? 1'b1 : 1'b0;//b-d<0 bdbias=1, else 0
-    // when b-d<0 pick data starting from 128-(b-d) else pick data starting from (b-d) 
+    assign bdbias = (current_pos_mod > {1'b0, nmod}) ? 1'b1 : 1'b0;
     assign shift_amount = bdbias ? (8'd128 + {2'd0, nmod} - {1'b0, current_pos_mod}): ({2'd0, nmod} - {1'b0, current_pos_mod});
-    assign shifted_polynomial = calc_buffer[shift_amount +: 128];
-
-    logic [255:0] segB_upper;
-    logic [383:0] segB_buffer;
-    logic [127:0] shifted_polynomial_B;
-    logic [8:0] segB_extract_pos;
-    logic [7:0] shift_amount_C;
-    logic [127:0] shifted_polynomial_C;
-
-    // Concatenate the two tail words with one head word
-    assign segB_upper = ({128'd0, head_buffer} << nmod) | {128'd0, tail_buffer_2};
-    assign segB_buffer = {segB_upper, tail_buffer_1};
-    //pick data starting from 128-(b-d)
-    assign segB_extract_pos = 9'd128 + {3'd0, nmod} - {2'd0, current_pos_mod};
-    assign shifted_polynomial_B = segB_buffer[segB_extract_pos +: 128];
-    // SEG_C: no nmod correction, just 128-d
     assign shift_amount_C = 8'd128 - {1'b0, current_pos_mod};
-    assign shifted_polynomial_C = calc_buffer[shift_amount_C +: 128];
+
+    // Strategy 2: fixed nmod shift replaces variable barrel shifter
+    logic [255:0] segB_upper;
+    always_comb begin
+        case (nmod)
+            6'd5:    segB_upper = ({128'd0, head_buffer} << 5)  | {128'd0, tail_buffer_2};
+            6'd11:   segB_upper = ({128'd0, head_buffer} << 11) | {128'd0, tail_buffer_2};
+            6'd37:   segB_upper = ({128'd0, head_buffer} << 37) | {128'd0, tail_buffer_2};
+            default: segB_upper = {128'd0, tail_buffer_2};
+        endcase
+    end
+
+    // Strategy 2: precomputed nmod mask
+    logic [127:0] nmod_mask;
+    always_comb begin
+        case (nmod)
+            6'd5:    nmod_mask = 128'h1F;
+            6'd11:   nmod_mask = 128'h7FF;
+            6'd37:   nmod_mask = 128'h1FFFFFFFFF;
+            default: nmod_mask = '0;
+        endcase
+    end
+
+    // Strategy 1: single shared 256-bit barrel shifter for SEG_A/B/C
+    logic [255:0] shifter_src;
+    logic [7:0]   shifter_shift;
+    logic [127:0] shifter_out;
+
+    always_comb begin
+        case (calc_state)
+            CALC_SEG_A: begin
+                shifter_src   = calc_buffer;
+                shifter_shift = shift_amount;
+            end
+            CALC_SEG_B: begin
+                shifter_src   = bdbias ? {segB_upper[127:0], tail_buffer_1} : segB_upper;
+                shifter_shift = shift_amount;
+            end
+            CALC_SEG_C: begin
+                shifter_src   = calc_buffer;
+                shifter_shift = shift_amount_C;
+            end
+            default: begin
+                shifter_src   = calc_buffer;
+                shifter_shift = '0;
+            end
+        endcase
+    end
+    assign shifter_out = shifter_src[shifter_shift +: 128];
     logic start_oncepos;
     always_comb begin//bram_dense_addr
         bram_dense_addr = '0;
@@ -231,7 +262,7 @@ module HQC_ASP_Top (
                     block_cnt <= block_cnt + 9'd1;
 
                     if (pipeline_valid) begin
-                        bram_out_data_w <= shifted_polynomial ^ bram_out_data;
+                        bram_out_data_w <= shifter_out ^ bram_out_data;
                         bram_out_addr_w <= block_cnt2addr(result_cnt);
                         wen <= 1'b1;
                         result_cnt <= result_cnt + 9'd1;
@@ -247,9 +278,9 @@ module HQC_ASP_Top (
                 CALC_SEG_B: begin
                     if (pipeline_valid) begin
                         if (current_pos_block == n)
-                            bram_out_data_w <= (shifted_polynomial_B ^ bram_out_data) & ((128'd1 << nmod) - 128'd1);
+                            bram_out_data_w <= (shifter_out ^ bram_out_data) & nmod_mask;
                         else
-                            bram_out_data_w <= shifted_polynomial_B ^ bram_out_data;
+                            bram_out_data_w <= shifter_out ^ bram_out_data;
                         bram_out_addr_w <= block_cnt2addr(current_pos_block);
                         wen <= 1'b1;
                         result_cnt <= result_cnt + 9'd1;
@@ -276,9 +307,9 @@ module HQC_ASP_Top (
 
                     if (pipeline_valid) begin
                         if (result_cnt == n)
-                            bram_out_data_w <= (shifted_polynomial_C ^ bram_out_data) & ((128'd1 << nmod) - 128'd1);
+                            bram_out_data_w <= (shifter_out ^ bram_out_data) & nmod_mask;
                         else
-                            bram_out_data_w <= shifted_polynomial_C ^ bram_out_data;
+                            bram_out_data_w <= shifter_out ^ bram_out_data;
                         bram_out_addr_w <= block_cnt2addr(result_cnt);
                         wen <= 1'b1;
                         result_cnt <= result_cnt + 9'd1;
