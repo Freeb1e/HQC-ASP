@@ -133,7 +133,7 @@ module HQC_ASP_Top (
         shifter_src_reg   <= shifter_src;
         shifter_shift_reg <= shifter_shift;
     end
-    assign shifter_out =  [shifter_shift_reg +: 128];
+    assign shifter_out = shifter_src_reg[shifter_shift_reg +: 128];
     logic start_oncepos;
     always_comb begin//bram_dense_addr
         bram_dense_addr = '0;
