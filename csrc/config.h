@@ -1,1 +1,2 @@
 #define MAX_SIM_TIME 200000
+#define TRACE_ON

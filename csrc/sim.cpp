@@ -35,16 +35,10 @@ void runtill();
 
 int main(int argc, char **argv, char **env)
 {
-    int hqc_mode = 0b010;
-    if (argc > 1) hqc_mode = atoi(argv[1]);
+    int weight_sel = 0;
+    if (argc > 1) weight_sel = atoi(argv[1]);
 
-    int dump_size = 0;
-    switch (hqc_mode & 0b110) {
-        case 0b010: dump_size = (138 + 1) * 16; break;
-        case 0b100: dump_size = (280 + 1) * 16; break;
-        case 0b110: dump_size = (450 + 1) * 16; break;
-        default:    dump_size = 2224; break;
-    }
+    int dump_size = (138 + 1) * 16;
 
     dut = new VTEST_PLATFORM;
     Verilated::traceEverOn(trace_on);
@@ -60,7 +54,7 @@ int main(int argc, char **argv, char **env)
 
     dut->rst_n = 0;
     dut->start = 0;
-    dut->HQC_MODE = hqc_mode;
+    dut->weight_sel = weight_sel;
     tick();
     tick();
     dut->rst_n = 1;

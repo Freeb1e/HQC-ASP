@@ -16,17 +16,15 @@ module HQC_ASP_Top (
         output logic [15:0] wmask,
         output logic wen,
 
-        input logic [2:0] HQC_MODE,
+        input logic weight_sel,
         input logic start
     );
 
-    parameter [8:0] n_HQC1 = 138 , n_HQC2 = 280 , n_HQC3 = 450;
-    parameter [5:0] nmod_HQC1 = 5 , nmod_HQC2 = 11 , nmod_HQC3 = 37;
-    parameter [7:0] weight_HQC1 = 66 , weight_HQC2 = 100, weight_HQC3 = 131;
-    parameter [7:0] weight_re_HQC1 = 75 , weight_re_HQC2 = 114, weight_re_HQC3 = 149;
+    localparam [8:0] n    = 9'd138;
+    localparam [5:0] nmod = 6'd5;
+    localparam [7:0] WEIGHT_NORMAL = 8'd66;
+    localparam [7:0] WEIGHT_RE     = 8'd75;
 
-    logic [8:0] n;
-    logic [5:0] nmod;
     logic [7:0] weight;
 
     function automatic logic [15:0] block_cnt2addr(
@@ -78,27 +76,10 @@ module HQC_ASP_Top (
     assign shift_amount = bdbias ? (8'd128 + {2'd0, nmod} - {1'b0, current_pos_mod}): ({2'd0, nmod} - {1'b0, current_pos_mod});
     assign shift_amount_C = 8'd128 - {1'b0, current_pos_mod};
 
-    // Strategy 2: fixed nmod shift replaces variable barrel shifter
     logic [255:0] segB_upper;
-    always_comb begin
-        case (nmod)
-            6'd5:    segB_upper = ({128'd0, head_buffer} << 5)  | {128'd0, tail_buffer_2};
-            6'd11:   segB_upper = ({128'd0, head_buffer} << 11) | {128'd0, tail_buffer_2};
-            6'd37:   segB_upper = ({128'd0, head_buffer} << 37) | {128'd0, tail_buffer_2};
-            default: segB_upper = {128'd0, tail_buffer_2};
-        endcase
-    end
+    assign segB_upper = ({128'd0, head_buffer} << 5) | {128'd0, tail_buffer_2};
 
-    // Strategy 2: precomputed nmod mask
-    logic [127:0] nmod_mask;
-    always_comb begin
-        case (nmod)
-            6'd5:    nmod_mask = 128'h1F;
-            6'd11:   nmod_mask = 128'h7FF;
-            6'd37:   nmod_mask = 128'h1FFFFFFFFF;
-            default: nmod_mask = '0;
-        endcase
-    end
+    localparam [127:0] nmod_mask = 128'h1F;
 
     // Strategy 1: single shared 256-bit barrel shifter for SEG_A/B/C
     // Pipeline: register inputs to break critical path
@@ -381,35 +362,12 @@ module HQC_ASP_Top (
 
     
 
-        always@(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            n      <= '0;
-            nmod   <= '0;
             weight <= '0;
         end
         else if (out_state == OUT_IDLE) begin
-            case (HQC_MODE[2:1])
-                2'd1: begin
-                    n      <= n_HQC1;
-                    nmod   <= nmod_HQC1;
-                    weight <= HQC_MODE[0] ? weight_re_HQC1 : weight_HQC1;
-                end
-                2'd2: begin
-                    n      <= n_HQC2;
-                    nmod   <= nmod_HQC2;
-                    weight <= HQC_MODE[0] ? weight_re_HQC2 : weight_HQC2;
-                end
-                2'd3: begin
-                    n      <= n_HQC3;
-                    nmod   <= nmod_HQC3;
-                    weight <= HQC_MODE[0] ? weight_re_HQC3 : weight_HQC3;
-                end
-                default: begin
-                    n      <= '0;
-                    nmod   <= '0;
-                    weight <= '0;
-                end
-            endcase
+            weight <= weight_sel ? WEIGHT_RE : WEIGHT_NORMAL;
         end
     end
 endmodule

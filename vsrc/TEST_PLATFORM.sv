@@ -2,7 +2,7 @@ module TEST_PLATFORM (
     input logic clk,
     input logic rst_n,
     input logic start,
-    input logic [2:0] HQC_MODE,
+    input logic weight_sel,
     output logic [127:0] out_wdata_o,
     output logic out_wen_o
 );
@@ -40,7 +40,7 @@ module TEST_PLATFORM (
         .wmask(out_wmask),
         .wen(out_wen),
 
-        .HQC_MODE(HQC_MODE),
+        .weight_sel(weight_sel),
         .start(start)
     );
 
