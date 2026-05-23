@@ -76,6 +76,18 @@ module HQC_ASP_Top (
     assign shift_amount = bdbias ? (8'd128 + {2'd0, nmod} - {1'b0, current_pos_mod}): ({2'd0, nmod} - {1'b0, current_pos_mod});
     assign shift_amount_C = 8'd128 - {1'b0, current_pos_mod};
 
+    logic [8:0] pos_block_latched;
+    logic       bdbias_latched;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pos_block_latched <= '0;
+            bdbias_latched    <= '0;
+        end else if (out_state == OUT_LOAD_POS || out_state == OUT_PREFTCH_HEAD) begin
+            pos_block_latched <= current_pos_block;
+            bdbias_latched    <= bdbias;
+        end
+    end
+
     logic [255:0] segB_upper;
     assign segB_upper = ({128'd0, head_buffer} << 5) | {128'd0, tail_buffer_2};
 
@@ -136,7 +148,7 @@ module HQC_ASP_Top (
             end
             OUT_CALC: begin
                 if (calc_state == CALC_IDLE)
-                    bram_dense_addr = block_cnt2addr(n - current_pos_block - {8'd0, bdbias} + 9'd1);
+                    bram_dense_addr = block_cnt2addr(n - pos_block_latched - {8'd0, bdbias_latched} + 9'd1);
                 else
                     bram_dense_addr = block_cnt2addr(block_cnt);
             end
@@ -243,7 +255,7 @@ module HQC_ASP_Top (
                             result_cnt <= '0;
                         end else begin
                             calc_state <= CALC_SEG_A;
-                            block_cnt <= n - current_pos_block - {8'd0, bdbias} + 9'd2;
+                            block_cnt <= n - pos_block_latched - {8'd0, bdbias_latched} + 9'd2;
                             result_cnt <= '0;
                             calc_buffer <= {bram_dense_data, calc_buffer[255:128]};
                         end
