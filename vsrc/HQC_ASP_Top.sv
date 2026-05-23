@@ -37,9 +37,7 @@ module HQC_ASP_Top (
 
     typedef enum logic [2:0] {
                 OUT_IDLE,
-                OUT_START,
-                OUT_PREFETCH_TAIL_1,
-                OUT_PREFETCH_TAIL_2,
+                OUT_PREFETCH_TAIL,
                 OUT_PREFTCH_HEAD,
                 OUT_LOAD_POS,
                 OUT_CALC
@@ -56,12 +54,11 @@ module HQC_ASP_Top (
 
     state_space_2 calc_state;
 
-    logic [127:0] tail_buffer_1, tail_buffer_2, head_buffer;
+    logic [127:0] tail_buffer, head_buffer;
     logic [8:0] block_cnt;
     logic [8:0] result_cnt;
     logic [255:0] calc_buffer;
     logic bdbias;
-    logic pipe_fill;
     logic pipe_ready;
     logic one_pos_done;
     logic [15:0] current_pos;
@@ -76,29 +73,28 @@ module HQC_ASP_Top (
     assign shift_amount = bdbias ? (8'd128 + {2'd0, nmod} - {1'b0, current_pos_mod}): ({2'd0, nmod} - {1'b0, current_pos_mod});
     assign shift_amount_C = 8'd128 - {1'b0, current_pos_mod};
 
+    logic fast_next;
+    assign fast_next = one_pos_done && (weight_cnt[2:0] != 3'd0);
+
     logic [8:0] pos_block_latched;
     logic       bdbias_latched;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pos_block_latched <= '0;
             bdbias_latched    <= '0;
-        end else if (out_state == OUT_LOAD_POS || out_state == OUT_PREFTCH_HEAD) begin
+        end else if (out_state == OUT_LOAD_POS || out_state == OUT_PREFTCH_HEAD || fast_next) begin
             pos_block_latched <= current_pos_block;
             bdbias_latched    <= bdbias;
         end
     end
 
     logic [255:0] segB_upper;
-    assign segB_upper = ({128'd0, head_buffer} << 5) | {128'd0, tail_buffer_2};
+    assign segB_upper = ({128'd0, head_buffer} << 5) | {128'd0, tail_buffer};
 
     localparam [127:0] nmod_mask = 128'h1F;
 
-    // Strategy 1: single shared 256-bit barrel shifter for SEG_A/B/C
-    // Pipeline: register inputs to break critical path
     logic [255:0] shifter_src;
     logic [7:0]   shifter_shift;
-    logic [255:0] shifter_src_reg;
-    logic [7:0]   shifter_shift_reg;
     logic [127:0] shifter_out;
 
     always_comb begin
@@ -108,7 +104,7 @@ module HQC_ASP_Top (
                 shifter_shift = shift_amount;
             end
             CALC_SEG_B: begin
-                shifter_src   = bdbias ? {segB_upper[127:0], tail_buffer_1} : segB_upper;
+                shifter_src   = bdbias ? {segB_upper[127:0], bram_dense_data} : segB_upper;
                 shifter_shift = shift_amount;
             end
             CALC_SEG_C: begin
@@ -122,22 +118,15 @@ module HQC_ASP_Top (
         endcase
     end
 
-    always_ff @(posedge clk) begin
-        shifter_src_reg   <= shifter_src;
-        shifter_shift_reg <= shifter_shift;
-    end
-    assign shifter_out = shifter_src_reg[shifter_shift_reg +: 128];
+    assign shifter_out = shifter_src[shifter_shift +: 128];
     logic start_oncepos;
     always_comb begin//bram_dense_addr
         bram_dense_addr = '0;
         case (out_state)
             OUT_IDLE: begin
-                bram_dense_addr = block_cnt2addr(n - 9'd1);
-            end
-            OUT_PREFETCH_TAIL_1: begin
                 bram_dense_addr = block_cnt2addr(n);
             end
-            OUT_PREFETCH_TAIL_2: begin
+            OUT_PREFETCH_TAIL: begin
                 bram_dense_addr = block_cnt2addr(9'd0);
             end
             OUT_PREFTCH_HEAD: begin
@@ -147,8 +136,14 @@ module HQC_ASP_Top (
                 bram_dense_addr = block_cnt2addr(n - current_pos_block - {8'd0, bdbias});
             end
             OUT_CALC: begin
-                if (calc_state == CALC_IDLE)
+                if (fast_next)
+                    bram_dense_addr = block_cnt2addr(n - current_pos_block - {8'd0, bdbias});
+                else if (calc_state == CALC_IDLE)
                     bram_dense_addr = block_cnt2addr(n - pos_block_latched - {8'd0, bdbias_latched} + 9'd1);
+                else if (calc_state == CALC_SEG_B && !pipe_ready)
+                    bram_dense_addr = block_cnt2addr(n - 9'd1);
+                else if (calc_state == CALC_SEG_A && pipe_ready && result_cnt == current_pos_block - 9'd1)
+                    bram_dense_addr = block_cnt2addr(n - 9'd1);
                 else
                     bram_dense_addr = block_cnt2addr(block_cnt);
             end
@@ -188,16 +183,12 @@ module HQC_ASP_Top (
             case (out_state)
                 OUT_IDLE: begin
                     if (start) begin
-                        out_state <= OUT_PREFETCH_TAIL_1;
+                        out_state <= OUT_PREFETCH_TAIL;
                     end
                 end
-                OUT_PREFETCH_TAIL_1: begin
-                    out_state <= OUT_PREFETCH_TAIL_2;
-                    tail_buffer_1 <= bram_dense_data;
-                end
-                OUT_PREFETCH_TAIL_2: begin
+                OUT_PREFETCH_TAIL: begin
                     out_state <= OUT_PREFTCH_HEAD;
-                    tail_buffer_2 <= bram_dense_data;
+                    tail_buffer <= bram_dense_data;
                 end
                 OUT_PREFTCH_HEAD: begin
                     out_state <= OUT_CALC;
@@ -208,6 +199,8 @@ module HQC_ASP_Top (
                         if (one_pos_done) begin
                             if (weight_cnt >= weight) begin
                                 out_state <= OUT_IDLE;
+                            end else if (weight_cnt[2:0] != 3'd0) begin
+                                start_oncepos <= 1'b1;
                             end else begin
                                 out_state <= OUT_LOAD_POS;
                             end
@@ -232,7 +225,6 @@ module HQC_ASP_Top (
             calc_buffer <= '0;
             block_cnt <= '0;
             result_cnt <= '0;
-            pipe_fill <= 1'b0;
             pipe_ready <= 1'b0;
             wen <= 1'b0;
             one_pos_done <= 1'b0;
@@ -247,7 +239,6 @@ module HQC_ASP_Top (
             case (calc_state)
                 CALC_IDLE: begin
                     wen <= 1'b0;
-                    pipe_fill <= 1'b0;
                     pipe_ready <= 1'b0;
                     if (start_oncepos) begin
                         if (current_pos_block == 9'd0) begin
@@ -272,14 +263,10 @@ module HQC_ASP_Top (
                         result_cnt <= result_cnt + 9'd1;
                         if (result_cnt == current_pos_block - 9'd1) begin
                             calc_state <= CALC_SEG_B;
-                            pipe_fill <= 1'b0;
-                            pipe_ready <= 1'b0;
+                            block_cnt <= 9'd1;
                         end
-                    end else if (pipe_fill) begin
-                        pipe_ready <= 1'b1;
-                        wen <= 1'b0;
                     end else begin
-                        pipe_fill <= 1'b1;
+                        pipe_ready <= 1'b1;
                         wen <= 1'b0;
                     end
                 end
@@ -294,22 +281,17 @@ module HQC_ASP_Top (
                         result_cnt <= result_cnt + 9'd1;
                         if (current_pos_block >= n) begin
                             calc_state <= CALC_IDLE;
-                            pipe_fill <= 1'b0;
                             pipe_ready <= 1'b0;
                             one_pos_done <= 1'b1;
                             weight_cnt <= weight_cnt + 8'd1;
                         end else begin
                             calc_state <= CALC_SEG_C;
-                            pipe_fill <= 1'b0;
                             pipe_ready <= 1'b0;
                             calc_buffer <= {head_buffer, 128'd0};
                             block_cnt <= 9'd2;
                         end
-                    end else if (pipe_fill) begin
-                        pipe_ready <= 1'b1;
-                        wen <= 1'b0;
                     end else begin
-                        pipe_fill <= 1'b1;
+                        pipe_ready <= 1'b1;
                         wen <= 1'b0;
                         block_cnt <= 9'd1;
                     end
@@ -328,16 +310,12 @@ module HQC_ASP_Top (
                         result_cnt <= result_cnt + 9'd1;
                         if (result_cnt == n) begin
                             calc_state <= CALC_IDLE;
-                            pipe_fill <= 1'b0;
                             pipe_ready <= 1'b0;
                             one_pos_done <= 1'b1;
                             weight_cnt <= weight_cnt + 8'd1;
                         end
-                    end else if (pipe_fill) begin
-                        pipe_ready <= 1'b1;
-                        wen <= 1'b0;
                     end else begin
-                        pipe_fill <= 1'b1;
+                        pipe_ready <= 1'b1;
                         wen <= 1'b0;
                     end
                 end
@@ -351,26 +329,7 @@ module HQC_ASP_Top (
     logic [7:0] weight_cnt;
     assign weight_idx = weight_cnt[2:0];
     assign bram_sparse_addr = {7'd0, weight_cnt[7:3], 4'b0000};
-    always_comb begin
-        case (weight_idx)
-            3'd0:
-                current_pos = bram_sparse_data[15:0];
-            3'd1:
-                current_pos = bram_sparse_data[31:16];
-            3'd2:
-                current_pos = bram_sparse_data[47:32];
-            3'd3:
-                current_pos = bram_sparse_data[63:48];
-            3'd4:
-                current_pos = bram_sparse_data[79:64];
-            3'd5:
-                current_pos = bram_sparse_data[95:80];
-            3'd6:
-                current_pos = bram_sparse_data[111:96];
-            3'd7:
-                current_pos = bram_sparse_data[127:112];
-        endcase
-    end
+    assign current_pos = bram_sparse_data[weight_idx*16 +: 16];
 
     
 
